@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Libros de la estantería</title>
+<style>
+:root{--bg:#f2f4f3;--fg:#17232b;--muted:#5d6b73;--card:#fff;--line:#d7dedc;--spine:#1f5f6b;--flag:#b45309;--flagbg:#fdf3e3;--err:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#11181c;--fg:#e8eeed;--muted:#9aa9b0;--card:#1a2328;--line:#2b373d;--spine:#5fb0bf;--flag:#f0a04b;--flagbg:#2d2214;--err:#ff8a7a}}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;max-width:640px;margin-inline:auto;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+h1{font:italic 600 1.7rem/1.2 Georgia,"Times New Roman",serif;margin:.3em 0 .8em}
+a{color:var(--spine)}
+button,input,.btn{font:inherit}
+input{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
+label{display:block;margin:8px 0;font-size:.9rem;color:var(--muted)}
+.btn,button{display:inline-block;padding:10px 16px;border:0;border-radius:6px;background:var(--spine);color:var(--bg);font-weight:600;cursor:pointer;text-align:center}
+.btn.alt,button.alt{background:transparent;color:var(--spine);border:1px solid var(--spine)}
+button:disabled{opacity:.5;cursor:default}
+:focus-visible{outline:3px solid var(--flag);outline-offset:2px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.row>*{flex:1 1 140px}
+details.cfg{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px 12px}
+summary{cursor:pointer;font-weight:600}
+.muted{color:var(--muted);font-size:.85rem}
+#msg{min-height:1.5em;margin:8px 0}
+#msg.err{color:var(--err)}
+#sum{font-weight:600;color:var(--flag)}
+ul{list-style:none;padding:0;margin:0}
+li.book{background:var(--card);border:1px solid var(--line);border-left:6px solid var(--spine);border-radius:6px;padding:10px 12px;margin:10px 0}
+li.book.caro{border-left-color:var(--flag);background:var(--flagbg)}
+.fila{display:flex;gap:8px;align-items:center}
+.fila input{flex:1}
+.fila input.t{font:italic 600 1rem Georgia,serif}
+.x{flex:0 0 auto;padding:6px 10px;background:transparent;color:var(--muted);border:1px solid var(--line)}
+.dud{font-size:.8rem;color:var(--flag)}
+.precio{margin-top:8px;font-weight:600}
+.precio.caro{color:var(--flag)}
+.precio.err{color:var(--err);font-weight:400}
+details.det{margin-top:4px;font-size:.9rem}
+details.det li{padding:2px 0}
+</style>
+</head>
+<body>
+<h1>Libros de la estantería</h1>
+
+<details class="cfg" id="cfg">
+  <summary>Ajustes</summary>
+  <label>Clave de API de Gemini
+    <input id="key" type="password" autocomplete="off" placeholder="Pégala aquí una sola vez">
+  </label>
+  <label>Modelo
+    <input id="model">
+  </label>
+  <p class="muted">La clave se guarda solo en este navegador. Consíguela gratis en <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>. Si el modelo deja de funcionar, cambia el nombre por otro modelo Flash disponible.</p>
+</details>
+
+<div class="row">
+  <label class="btn" style="margin:0">Hacer foto<input id="cam" type="file" accept="image/*" capture="environment" hidden></label>
+  <label class="btn alt" style="margin:0">Elegir de la galería<input id="gal" type="file" accept="image/*" hidden></label>
+</div>
+<p id="msg" role="status">Haz una foto de una balda, de frente y con buena luz.</p>
+<p id="sum"></p>
+<ul id="list"></ul>
+<div class="row">
+  <button id="add" class="alt">Añadir libro</button>
+  <button id="clear" class="alt">Vaciar lista</button>
+  <button id="go">Buscar precios</button>
+</div>
+<p class="muted">Los precios salen de búsquedas en Google y pueden ser inexactos o de otra edición. Comprueba cada uno con sus enlaces.</p>
+
+<script>
+const $ = id => document.getElementById(id);
+const LIMITE = 30;
+let books = [];
+
+const store = {
+  get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
+  set(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
+};
+$('key').value = store.get('gkey') || '';
+$('model').value = store.get('gmodel') || 'gemini-2.5-flash';
+$('cfg').open = !$('key').value;
+$('key').addEventListener('change', () => store.set('gkey', $('key').value.trim()));
+$('model').addEventListener('change', () => store.set('gmodel', $('model').value.trim()));
+
+function msg(t, err){ const m = $('msg'); m.textContent = t; m.className = err ? 'err' : ''; }
+const esperar = ms => new Promise(r => setTimeout(r, ms));
+const euros = n => n.toLocaleString('es-ES', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' €';
+
+async function gemini(parts, tools){
+  const key = $('key').value.trim(), model = $('model').value.trim();
+  if(!key) throw new Error('Falta la clave de API de Gemini (Ajustes).');
+  const body = {contents:[{parts}]};
+  if(tools) body.tools = tools; else body.generationConfig = {responseMimeType:'application/json'};
+  for(let i = 0; i < 2; i++){
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-goog-api-key':key},
+      body:JSON.stringify(body)
+    });
+    if(r.status === 429 && i === 0){ await esperar(15000); continue; }
+    const j = await r.json();
+    if(!r.ok) throw new Error((j.error && j.error.message) || ('Error ' + r.status));
+    const p = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
+    return p.map(x => x.text || '').join('');
+  }
+}
+
+function leerJSON(t){
+  const m = (t || '').match(/[\[{][\s\S]*[\]}]/);
+  if(!m) throw new Error('La respuesta no tenía el formato esperado.');
+  return JSON.parse(m[0]);
+}
+
+function reducir(file){
+  return new Promise((ok, ko) => {
+    const img = new Image(), u = URL.createObjectURL(file);
+    img.onload = () => {
+      const s = Math.min(1, 1800 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(u);
+      ok(c.toDataURL('image/jpeg', .85).split(',')[1]);
+    };
+    img.onerror = () => ko(new Error('No se pudo abrir la imagen.'));
+    img.src = u;
+  });
+}
+
+const PROMPT_LEER = 'Esta foto muestra libros en una estantería. Lee los lomos y devuelve SOLO un array JSON con un objeto por libro: {"titulo":"...","autor":"...","dudoso":true o false}. Pon dudoso:true si no estás seguro de la lectura. Si no se ve el autor, déjalo vacío. No inventes libros ni incluyas lomos ilegibles.';
+
+async function alFoto(e){
+  const f = e.target.files[0]; e.target.value = '';
+  if(!f) return;
+  msg('Leyendo la foto…');
+  try{
+    const data = await reducir(f);
+    const arr = leerJSON(await gemini([{text:PROMPT_LEER}, {inline_data:{mime_type:'image/jpeg', data}}]));
+    let nuevos = 0;
+    (Array.isArray(arr) ? arr : []).forEach(b => {
+      if(!b || !b.titulo) return;
+      const t = String(b.titulo).trim();
+      if(books.some(x => x.titulo.toLowerCase() === t.toLowerCase())) return;
+      books.push({titulo:t, autor:String(b.autor || '').trim(), dudoso:!!b.dudoso, res:null});
+      nuevos++;
+    });
+    render();
+    msg(nuevos ? nuevos + ' libros añadidos. Revisa y corrige la lista.' : 'No se ha podido leer ningún título nuevo. Prueba con otra foto.');
+  }catch(err){ msg(err.message, true); }
+}
+$('cam').addEventListener('change', alFoto);
+$('gal').addEventListener('change', alFoto);
+
+const aNumero = x => typeof x === 'number' ? x : parseFloat(String(x).replace(/[^\d,.]/g,'').replace(',', '.'));
+const urlSegura = u => /^https?:\/\//i.test(u) ? u : '';
+const enlaceIberlibro = b => 'https://www.iberlibro.com/servlet/SearchResults?kn=' + encodeURIComponent((b.titulo + ' ' + b.autor).trim());
+
+async function precios(b){
+  const q = 'Busca en internet el precio actual en euros del libro "' + b.titulo + '"' + (b.autor ? ' de ' + b.autor : '') +
+    ', en tiendas online (prioriza España), nuevo o de segunda mano. Responde SOLO con un JSON así: {"precios":[{"tienda":"nombre","precio":12.5,"url":"enlace"}]}. Usa únicamente precios que aparezcan en los resultados; si no encuentras ninguno, devuelve {"precios":[]}.';
+  const o = leerJSON(await gemini([{text:q}], [{google_search:{}}]));
+  const lista = (o.precios || []).map(p => ({tienda:String(p.tienda || ''), precio:aNumero(p.precio), url:urlSegura(String(p.url || ''))}))
+    .filter(p => p.precio > 0);
+  const media = lista.length ? lista.reduce((s,p) => s + p.precio, 0) / lista.length : null;
+  return {lista, media};
+}
+
+async function buscar(){
+  if(!books.length) return msg('Primero añade algún libro.', true);
+  $('go').disabled = true;
+  for(let i = 0; i < books.length; i++){
+    msg('Buscando precios: ' + (i + 1) + ' de ' + books.length + '…');
+    try{ books[i].res = await precios(books[i]); }
+    catch(err){ books[i].res = {error:err.message}; }
+    render();
+    await esperar(1200);
+  }
+  $('go').disabled = false;
+  msg('Búsqueda terminada.');
+}
+
+function el(tag, cls, txt){
+  const e = document.createElement(tag);
+  if(cls) e.className = cls;
+  if(txt !== undefined) e.textContent = txt;
+  return e;
+}
+
+function render(){
+  const ul = $('list'); ul.textContent = '';
+  const caros = [];
+  books.forEach((b, i) => {
+    const caro = b.res && b.res.media > LIMITE;
+    if(caro) caros.push(b.titulo);
+    const li = el('li', 'book' + (caro ? ' caro' : ''));
+    const f1 = el('div', 'fila');
+    const t = el('input', 't'); t.value = b.titulo; t.setAttribute('aria-label', 'Título');
+    t.addEventListener('input', () => { b.titulo = t.value; b.res = null; });
+    const x = el('button', 'x', '✕'); x.setAttribute('aria-label', 'Quitar libro');
+    x.addEventListener('click', () => { books.splice(i, 1); render(); });
+    f1.append(t, x);
+    const f2 = el('div', 'fila'); f2.style.marginTop = '6px';
+    const a = el('input'); a.value = b.autor; a.placeholder = 'Autor'; a.setAttribute('aria-label', 'Autor');
+    a.addEventListener('input', () => { b.autor = a.value; b.res = null; });
+    f2.append(a);
+    li.append(f1, f2);
+    if(b.dudoso) li.append(el('div', 'dud', 'Lectura dudosa: revisa el título.'));
+
+    if(b.res){
+      if(b.res.error){
+        li.append(el('div', 'precio err', b.res.error));
+      }else if(b.res.media === null){
+        li.append(el('div', 'precio', 'Sin precio encontrado'));
+      }else{
+        const n = b.res.lista.length;
+        li.append(el('div', 'precio' + (caro ? ' caro' : ''),
+          (n > 1 ? 'Precio medio: ' : 'Precio: ') + euros(b.res.media) + (n > 1 ? ' (' + n + ' precios)' : '') + (caro ? ' · supera ' + LIMITE + ' €' : '')));
+        const d = el('details', 'det'); d.append(el('summary', '', 'Ver precios'));
+        const u = el('ul');
+        b.res.lista.forEach(p => {
+          const l = el('li'); l.append(document.createTextNode(euros(p.precio) + ' · ' + (p.tienda || 'tienda')));
+          if(p.url){ l.append(document.createTextNode(' · ')); const k = el('a', '', 'enlace'); k.href = p.url; k.target = '_blank'; k.rel = 'noopener'; l.append(k); }
+          u.append(l);
+        });
+        d.append(u); li.append(d);
+      }
+      const v = el('div', 'muted'); const k = el('a', '', 'Buscar en IberLibro');
+      k.href = enlaceIberlibro(b); k.target = '_blank'; k.rel = 'noopener'; v.append(k); li.append(v);
+    }
+    ul.append(li);
+  });
+  $('sum').textContent = caros.length ? caros.length + (caros.length === 1 ? ' libro supera ' : ' libros superan ') + LIMITE + ' €: ' + caros.join(', ') : '';
+}
+
+$('add').addEventListener('click', () => { books.push({titulo:'', autor:'', dudoso:false, res:null}); render(); });
+$('clear').addEventListener('click', () => { if(!books.length || confirm('¿Vaciar la lista?')){ books = []; render(); msg(''); } });
+$('go').addEventListener('click', buscar);
+render();
+</script>
+</body>
+</html>
